@@ -2,10 +2,18 @@ import { NextResponse } from "next/server";
 import { isAdminAuthenticated } from "@/lib/admin-auth";
 import { supabaseAdmin } from "@/lib/supabase-server";
 
-// Luk aktiv sæson
-export async function DELETE() {
+const MASTER_KODE = process.env.MASTER_KODE || "Marked2026";
+
+// Luk aktiv sæson (kræver masterkode)
+export async function DELETE(req: Request) {
   if (!(await isAdminAuthenticated())) {
     return NextResponse.json({ error: "Ikke autoriseret" }, { status: 401 });
+  }
+
+  const { masterkode } = await req.json();
+
+  if (masterkode !== MASTER_KODE) {
+    return NextResponse.json({ error: "Forkert masterkode" }, { status: 403 });
   }
 
   const { data: aktiv } = await supabaseAdmin
@@ -32,7 +40,6 @@ export async function POST() {
     return NextResponse.json({ error: "Ikke autoriseret" }, { status: 401 });
   }
 
-  // Find højeste årstal
   const { data: seneste } = await supabaseAdmin
     .from("saesoner")
     .select("aar")
@@ -42,7 +49,6 @@ export async function POST() {
 
   const nytAar = seneste ? seneste.aar + 1 : new Date().getFullYear();
 
-  // Luk eventuelle aktive sæsoner først
   await supabaseAdmin
     .from("saesoner")
     .update({ aktiv: false })

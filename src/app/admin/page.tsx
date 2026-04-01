@@ -3,18 +3,40 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Html5Qrcode } from "html5-qrcode";
 
-type Depositum = {
-  id: string;
-  device_id: string;
-  status: string;
-  aar: number;
-  oprettet_at: string;
-};
-
 type Saeson = {
   aar: number;
   aktiv: boolean;
 };
+
+type Feedback = {
+  type: "aktiveret" | "udbetalt" | "advarsel" | "fejl";
+  besked: string;
+};
+
+// Generer en kort bip-lyd via Web Audio API
+function bip(frekvens: number, varighed: number) {
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = frekvens;
+    gain.gain.value = 0.3;
+    osc.start();
+    osc.stop(ctx.currentTime + varighed / 1000);
+  } catch {
+    // Ignorer hvis AudioContext ikke er tilgængelig
+  }
+}
+
+function vibrér(ms: number) {
+  try {
+    navigator.vibrate?.(ms);
+  } catch {
+    // Ignorer
+  }
+}
 
 export default function AdminPage() {
   const [loggetInd, setLoggetInd] = useState<boolean | null>(null);
@@ -22,11 +44,11 @@ export default function AdminPage() {
   const [loginFejl, setLoginFejl] = useState(false);
 
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<Depositum | null>(null);
-  const [scanFejl, setScanFejl] = useState<string | null>(null);
-  const [handling, setHandling] = useState(false);
-  const [bekraeftelse, setBekraeftelse] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [behandler, setBehandler] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const sidsteScanRef = useRef<string>("");
+  const debounceRef = useRef<number>(0);
 
   const [saesoner, setSaesoner] = useState<Saeson[]>([]);
   const [aktivSaeson, setAktivSaeson] = useState<number | null>(null);
@@ -70,10 +92,71 @@ export default function AdminPage() {
     if (loggetInd) hentData();
   }, [loggetInd, hentData]);
 
-  // QR Scanner
+  // Auto-håndtering ved scan
+  async function haandterScan(depositumId: string) {
+    // Debounce: ignorer samme kode indenfor 2 sekunder
+    const nu = Date.now();
+    if (depositumId === sidsteScanRef.current && nu - debounceRef.current < 2000) {
+      return;
+    }
+    sidsteScanRef.current = depositumId;
+    debounceRef.current = nu;
+
+    setBehandler(true);
+    setFeedback(null);
+
+    const res = await fetch("/api/admin/haandter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ depositumId }),
+    });
+
+    setBehandler(false);
+
+    if (!res.ok) {
+      const err = await res.json();
+      bip(200, 300);
+      vibrér(300);
+      setFeedback({ type: "fejl", besked: err.error || "Ukendt fejl" });
+      autoNulstil(3000);
+      return;
+    }
+
+    const { resultat } = await res.json();
+
+    if (resultat === "aktiveret") {
+      bip(880, 150);
+      vibrér(100);
+      setFeedback({ type: "aktiveret", besked: "Kræmmer aktiveret!" });
+      hentData();
+      autoNulstil(2000);
+    } else if (resultat === "udbetalt") {
+      bip(660, 150);
+      setTimeout(() => bip(880, 150), 200);
+      vibrér(100);
+      setFeedback({ type: "udbetalt", besked: "Depositum udbetalt!" });
+      hentData();
+      autoNulstil(2000);
+    } else if (resultat === "allerede_udbetalt") {
+      bip(200, 500);
+      vibrér(500);
+      setFeedback({
+        type: "advarsel",
+        besked: "ADVARSEL: Allerede udbetalt!",
+      });
+      autoNulstil(3000);
+    }
+  }
+
+  function autoNulstil(ms: number) {
+    setTimeout(() => {
+      setFeedback(null);
+    }, ms);
+  }
+
+  // QR Scanner — kører kontinuerligt, stopper ikke ved scan
   async function startScanner() {
-    setScanResult(null);
-    setScanFejl(null);
+    setFeedback(null);
     setScanning(true);
 
     await new Promise((r) => setTimeout(r, 100));
@@ -86,108 +169,52 @@ export default function AdminPage() {
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 250, height: 250 } },
         async (decodedText) => {
-          await scanner.stop();
-          scannerRef.current = null;
-          setScanning(false);
-          await slaOp(decodedText);
+          // Scanner kører videre — debounce håndterer dubletter
+          await haandterScan(decodedText);
         },
         () => {}
       );
     } catch {
-      setScanFejl("Kunne ikke starte kameraet. Tjek tilladelser.");
+      setFeedback({
+        type: "fejl",
+        besked: "Kunne ikke starte kameraet. Tjek tilladelser.",
+      });
       setScanning(false);
     }
   }
 
   async function stopScanner() {
     if (scannerRef.current) {
-      await scannerRef.current.stop();
+      try {
+        await scannerRef.current.stop();
+      } catch {
+        // Ignorer
+      }
       scannerRef.current = null;
     }
     setScanning(false);
+    setFeedback(null);
   }
 
-  async function slaOp(depositumId: string) {
-    const res = await fetch("/api/admin/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ depositumId }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json();
-      setScanFejl(err.error || "Ukendt fejl");
-      return;
-    }
-
-    const { depositum } = await res.json();
-    setScanResult(depositum);
-  }
-
-  function nulstilTilScanner() {
-    setScanResult(null);
-    setScanFejl(null);
-    setBekraeftelse(null);
-  }
-
-  function visBekreeftelse(besked: string) {
-    setScanResult(null);
-    setScanFejl(null);
-    setBekraeftelse(besked);
-    hentData();
-    setTimeout(() => {
-      setBekraeftelse(null);
-    }, 2000);
-  }
-
-  async function aktiverKraemmer() {
-    if (!scanResult) return;
-    setHandling(true);
-
-    const res = await fetch("/api/admin/aktiver", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ depositumId: scanResult.id }),
-    });
-
-    setHandling(false);
-
-    if (!res.ok) {
-      const err = await res.json();
-      setScanFejl(err.error || "Fejl ved aktivering");
-      setScanResult(null);
-      return;
-    }
-
-    visBekreeftelse("Kræmmer aktiveret!");
-  }
-
-  async function udbetalKraemmer() {
-    if (!scanResult) return;
-    setHandling(true);
-
-    const res = await fetch("/api/admin/udbetal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ depositumId: scanResult.id }),
-    });
-
-    setHandling(false);
-
-    if (!res.ok) {
-      const err = await res.json();
-      setScanFejl(err.error || "Fejl ved udbetaling");
-      setScanResult(null);
-      return;
-    }
-
-    visBekreeftelse("Depositum udbetalt!");
-  }
-
-  // Sæsonstyring
+  // Sæsonstyring med masterkode
   async function lukSaeson() {
-    if (!confirm(`Luk sæson ${aktivSaeson}?`)) return;
-    await fetch("/api/admin/saeson", { method: "DELETE" });
+    const masterkode = prompt(
+      `Indtast masterkode for at lukke sæson ${aktivSaeson}:`
+    );
+    if (!masterkode) return;
+
+    const res = await fetch("/api/admin/saeson", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ masterkode }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.error || "Fejl ved lukning af sæson");
+      return;
+    }
+
     hentData();
   }
 
@@ -241,11 +268,22 @@ export default function AdminPage() {
     );
   }
 
+  // Feedback-styling
+  const feedbackStyles: Record<string, string> = {
+    aktiveret: "bg-green-100 border-green-400 text-green-700",
+    udbetalt: "bg-blue-100 border-blue-400 text-blue-700",
+    advarsel: "bg-red-100 border-red-400 text-red-700",
+    fejl: "bg-red-100 border-red-400 text-red-700",
+  };
+
   return (
     <div className="max-w-lg mx-auto p-6 pt-8">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Admin</h1>
-        <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-700">
+        <button
+          onClick={logout}
+          className="text-sm text-gray-500 hover:text-gray-700"
+        >
           Log ud
         </button>
       </div>
@@ -270,17 +308,7 @@ export default function AdminPage() {
       <div className="bg-white rounded-xl shadow p-6 mb-6">
         <h2 className="font-semibold mb-4">Scan kræmmer</h2>
 
-        {/* Bekræftelses-besked efter handling */}
-        {bekraeftelse && (
-          <div className="text-center">
-            <div className="bg-green-100 border-2 border-green-400 rounded-xl p-6">
-              <p className="text-green-700 font-bold text-lg">{bekraeftelse}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Klar til scanning */}
-        {!scanning && !scanResult && !scanFejl && !bekraeftelse && (
+        {!scanning && (
           <button
             onClick={startScanner}
             className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition"
@@ -291,82 +319,44 @@ export default function AdminPage() {
 
         {scanning && (
           <div>
-            <div id="qr-reader" className="rounded-lg overflow-hidden mb-3" />
+            <div
+              id="qr-reader"
+              className="rounded-lg overflow-hidden mb-3"
+            />
+
+            {/* Feedback-overlay */}
+            {feedback && (
+              <div
+                className={`border-2 rounded-xl p-5 mb-3 text-center ${
+                  feedbackStyles[feedback.type]
+                }`}
+              >
+                <p
+                  className={`font-bold ${
+                    feedback.type === "advarsel" ? "text-2xl" : "text-lg"
+                  }`}
+                >
+                  {feedback.besked}
+                </p>
+                {feedback.type === "advarsel" && (
+                  <p className="text-sm mt-1">
+                    Muligt forsøg på snyd!
+                  </p>
+                )}
+              </div>
+            )}
+
+            {behandler && (
+              <div className="text-center py-2">
+                <p className="text-gray-500 text-sm">Behandler...</p>
+              </div>
+            )}
+
             <button
               onClick={stopScanner}
               className="w-full bg-gray-200 text-gray-700 py-2 rounded-lg text-sm"
             >
               Stop scanner
-            </button>
-          </div>
-        )}
-
-        {/* Status: Afventer → kan aktiveres */}
-        {scanResult && scanResult.status === "afventer" && (
-          <div className="text-center">
-            <div className="inline-block px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-sm font-medium mb-3">
-              Afventer aktivering
-            </div>
-            <p className="text-gray-600 text-sm mb-4">
-              Kræmmeren har ikke betalt depositum endnu.
-            </p>
-            <button
-              onClick={aktiverKraemmer}
-              disabled={handling}
-              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 transition text-lg"
-            >
-              {handling ? "Aktiverer..." : "Aktivér — depositum betalt"}
-            </button>
-            <button onClick={nulstilTilScanner} className="w-full mt-2 text-gray-500 text-sm py-2">
-              Annuller
-            </button>
-          </div>
-        )}
-
-        {/* Status: Aktiv → kan udbetales */}
-        {scanResult && scanResult.status === "aktiv" && (
-          <div className="text-center">
-            <div className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium mb-3">
-              Aktiv
-            </div>
-            <p className="text-gray-600 text-sm mb-4">
-              Kræmmeren har betalt depositum. Tjek at pladsen er pæn.
-            </p>
-            <button
-              onClick={udbetalKraemmer}
-              disabled={handling}
-              className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition text-lg"
-            >
-              {handling ? "Udbetaler..." : "Udbetal depositum"}
-            </button>
-            <button onClick={nulstilTilScanner} className="w-full mt-2 text-gray-500 text-sm py-2">
-              Annuller
-            </button>
-          </div>
-        )}
-
-        {/* Status: Udbetalt → ADVARSEL (kun fra database-opslag) */}
-        {scanResult && scanResult.status === "udbetalt" && (
-          <div className="text-center">
-            <div className="bg-red-100 border-2 border-red-400 rounded-xl p-6 mb-4">
-              <p className="text-red-700 font-bold text-xl mb-1">
-                ALLEREDE UDBETALT
-              </p>
-              <p className="text-red-600 text-sm">
-                Dette depositum er allerede udbetalt. Muligt forsøg på snyd!
-              </p>
-            </div>
-            <button onClick={nulstilTilScanner} className="text-gray-500 text-sm py-2">
-              Scan ny
-            </button>
-          </div>
-        )}
-
-        {scanFejl && !scanResult && (
-          <div className="text-center">
-            <p className="text-red-500 mb-3">{scanFejl}</p>
-            <button onClick={nulstilTilScanner} className="text-blue-600 text-sm">
-              Prøv igen
             </button>
           </div>
         )}
@@ -405,7 +395,9 @@ export default function AdminPage() {
             {saesoner.map((s) => (
               <div key={s.aar} className="flex justify-between text-sm py-1">
                 <span>{s.aar}</span>
-                <span className={s.aktiv ? "text-green-600" : "text-gray-400"}>
+                <span
+                  className={s.aktiv ? "text-green-600" : "text-gray-400"}
+                >
                   {s.aktiv ? "Aktiv" : "Lukket"}
                 </span>
               </div>
