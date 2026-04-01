@@ -13,10 +13,15 @@ export async function GET() {
     .order("aar", { ascending: false });
 
   const aktiv = saesoner?.find((s) => s.aktiv);
-
-  let stats = { aktive: 0, udbetalte: 0 };
+  let stats = { afventer: 0, aktive: 0, udbetalte: 0 };
 
   if (aktiv) {
+    const { count: afventer } = await supabaseAdmin
+      .from("deposita")
+      .select("*", { count: "exact", head: true })
+      .eq("aar", aktiv.aar)
+      .eq("status", "afventer");
+
     const { count: aktive } = await supabaseAdmin
       .from("deposita")
       .select("*", { count: "exact", head: true })
@@ -29,7 +34,11 @@ export async function GET() {
       .eq("aar", aktiv.aar)
       .eq("status", "udbetalt");
 
-    stats = { aktive: aktive ?? 0, udbetalte: udbetalte ?? 0 };
+    stats = {
+      afventer: afventer ?? 0,
+      aktive: aktive ?? 0,
+      udbetalte: udbetalte ?? 0,
+    };
   }
 
   return NextResponse.json({

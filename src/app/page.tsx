@@ -1,19 +1,16 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { supabase } from "@/lib/supabase";
 
-type Status = "ingen" | "aktiv" | "udbetalt";
+type Status = "ny" | "afventer" | "aktiv" | "udbetalt";
 
 export default function KraemmerPage() {
-  const [deviceId, setDeviceId] = useState<string>("");
+  const [deviceId, setDeviceId] = useState("");
   const [depositId, setDepositId] = useState<string | null>(null);
-  const [status, setStatus] = useState<Status>("ingen");
+  const [status, setStatus] = useState<Status>("ny");
   const [loading, setLoading] = useState(true);
-  const [registrering, setRegistrering] = useState(false);
-  const [billedeUrl, setBilledeUrl] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   // Generer eller hent device ID
   useEffect(() => {
@@ -25,12 +22,11 @@ export default function KraemmerPage() {
     setDeviceId(id);
   }, []);
 
-  // Hent eksisterende depositum
+  // Hent eller opret depositum
   useEffect(() => {
     if (!deviceId) return;
 
-    async function hentStatus() {
-      // Find aktiv sæson
+    async function init() {
       const { data: saeson } = await supabase
         .from("saesoner")
         .select("aar")
@@ -38,73 +34,59 @@ export default function KraemmerPage() {
         .single();
 
       if (!saeson) {
-        setStatus("ingen");
         setLoading(false);
         return;
       }
 
-      const { data } = await supabase
+      // Tjek om der allerede findes en record
+      const { data: existing } = await supabase
         .from("deposita")
         .select("id, status")
         .eq("device_id", deviceId)
         .eq("aar", saeson.aar)
         .single();
 
-      if (data) {
-        setDepositId(data.id);
-        setStatus(data.status as Status);
+      if (existing) {
+        setDepositId(existing.id);
+        setStatus(existing.status as Status);
       } else {
-        setStatus("ingen");
+        // Opret automatisk med status 'afventer'
+        const { data: ny, error } = await supabase
+          .from("deposita")
+          .insert({ device_id: deviceId, aar: saeson.aar })
+          .select("id")
+          .single();
+
+        if (ny && !error) {
+          setDepositId(ny.id);
+          setStatus("afventer");
+        }
       }
+
       setLoading(false);
     }
 
-    hentStatus();
+    init();
   }, [deviceId]);
 
-  async function registrer() {
-    setRegistrering(true);
+  // Poll for statusopdatering hvert 3. sekund
+  useEffect(() => {
+    if (!depositId || status === "udbetalt") return;
 
-    const { data: saeson } = await supabase
-      .from("saesoner")
-      .select("aar")
-      .eq("aktiv", true)
-      .single();
+    const interval = setInterval(async () => {
+      const { data } = await supabase
+        .from("deposita")
+        .select("status")
+        .eq("id", depositId)
+        .single();
 
-    if (!saeson) {
-      alert("Ingen aktiv sæson fundet. Kontakt arrangøren.");
-      setRegistrering(false);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("deposita")
-      .insert({ device_id: deviceId, aar: saeson.aar })
-      .select("id")
-      .single();
-
-    if (error) {
-      if (error.code === "23505") {
-        alert("Denne enhed er allerede registreret for denne sæson.");
-      } else {
-        alert("Fejl ved registrering: " + error.message);
+      if (data && data.status !== status) {
+        setStatus(data.status as Status);
       }
-      setRegistrering(false);
-      return;
-    }
+    }, 3000);
 
-    setDepositId(data.id);
-    setStatus("aktiv");
-    setRegistrering(false);
-  }
-
-  function haandterBillede(e: React.ChangeEvent<HTMLInputElement>) {
-    const fil = e.target.files?.[0];
-    if (fil) {
-      const url = URL.createObjectURL(fil);
-      setBilledeUrl(url);
-    }
-  }
+    return () => clearInterval(interval);
+  }, [depositId, status]);
 
   if (loading) {
     return (
@@ -120,67 +102,44 @@ export default function KraemmerPage() {
         Kræmmer Depositum
       </h1>
       <p className="text-gray-500 text-center text-sm mb-8">
-        Registrér dit depositum og vis din QR-kode til udbetaling
+        Vis din QR-kode til arrangøren
       </p>
 
-      {/* Ingen registrering endnu */}
-      {status === "ingen" && (
+      {/* Afventer — vis QR til første scanning */}
+      {status === "afventer" && depositId && (
         <div className="bg-white rounded-xl shadow p-6 text-center">
-          <div className="text-5xl mb-4">🏪</div>
-          <h2 className="text-lg font-semibold mb-2">Velkommen, kræmmer!</h2>
-          <p className="text-gray-600 mb-6">
-            Tryk på knappen herunder for at registrere dit depositum.
+          <div className="inline-block px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-sm font-medium mb-4">
+            Afventer aktivering
+          </div>
+          <p className="text-gray-600 mb-4">
+            Vis denne QR-kode til arrangøren ved ankomst for at betale dit
+            depositum.
           </p>
-          <button
-            onClick={registrer}
-            disabled={registrering}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition"
-          >
-            {registrering ? "Registrerer..." : "Registrér depositum"}
-          </button>
+          <div className="flex justify-center mb-4 p-4 bg-white rounded-lg border-2 border-gray-100">
+            <QRCodeSVG value={depositId} size={220} level="H" />
+          </div>
+          <p className="text-xs text-gray-400">
+            Siden opdaterer automatisk når du er aktiveret.
+          </p>
         </div>
       )}
 
-      {/* Aktiv - vis QR-kode */}
+      {/* Aktiv — vis QR til anden scanning */}
       {status === "aktiv" && depositId && (
         <div className="bg-white rounded-xl shadow p-6 text-center">
           <div className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium mb-4">
-            ● Aktiv
+            Aktiv
           </div>
           <p className="text-gray-600 mb-4">
-            Vis denne QR-kode til arrangøren for at få dit depositum udbetalt.
+            Dit depositum er registreret. Vis denne QR-kode til arrangøren
+            når markedet er slut for at få dit depositum udbetalt.
           </p>
-          <div className="flex justify-center mb-6 p-4 bg-white rounded-lg border-2 border-gray-100">
-            <QRCodeSVG value={depositId} size={200} level="H" />
+          <div className="flex justify-center mb-4 p-4 bg-white rounded-lg border-2 border-gray-100">
+            <QRCodeSVG value={depositId} size={220} level="H" />
           </div>
-
-          {/* Billede-upload (kun lokal visning) */}
-          <div className="border-t pt-4">
-            <p className="text-sm text-gray-500 mb-3">
-              Tag et billede af din pæne plads (valgfrit)
-            </p>
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={haandterBillede}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-200 transition"
-            >
-              📷 {billedeUrl ? "Skift billede" : "Tag billede"}
-            </button>
-            {billedeUrl && (
-              <img
-                src={billedeUrl}
-                alt="Plads-billede"
-                className="mt-4 rounded-lg w-full object-cover max-h-64"
-              />
-            )}
-          </div>
+          <p className="text-xs text-gray-400">
+            Husk: Vis din pæne plads først!
+          </p>
         </div>
       )}
 
@@ -188,13 +147,21 @@ export default function KraemmerPage() {
       {status === "udbetalt" && (
         <div className="bg-white rounded-xl shadow p-6 text-center">
           <div className="inline-block px-3 py-1 bg-gray-100 text-gray-600 rounded-full text-sm font-medium mb-4">
-            ✓ Udbetalt
+            Udbetalt
           </div>
-          <div className="text-5xl mb-4">✅</div>
+          <div className="text-5xl mb-4">&#10003;</div>
           <h2 className="text-lg font-semibold mb-2">Depositum udbetalt</h2>
           <p className="text-gray-600">
-            Dit depositum er blevet udbetalt. Tak for din deltagelse, og vi ses
-            næste år!
+            Dit depositum er blevet udbetalt. Tak for din deltagelse!
+          </p>
+        </div>
+      )}
+
+      {/* Ingen sæson */}
+      {status === "ny" && !loading && (
+        <div className="bg-white rounded-xl shadow p-6 text-center">
+          <p className="text-gray-500">
+            Der er ingen aktiv sæson lige nu. Kom tilbage senere.
           </p>
         </div>
       )}

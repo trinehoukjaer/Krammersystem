@@ -21,19 +21,17 @@ export default function AdminPage() {
   const [kode, setKode] = useState("");
   const [loginFejl, setLoginFejl] = useState(false);
 
-  // Scanner
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<Depositum | null>(null);
   const [scanFejl, setScanFejl] = useState<string | null>(null);
+  const [handling, setHandling] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
-  const scannerContainerId = "qr-reader";
 
-  // Sæsoner
   const [saesoner, setSaesoner] = useState<Saeson[]>([]);
   const [aktivSaeson, setAktivSaeson] = useState<number | null>(null);
-  const [stats, setStats] = useState({ aktive: 0, udbetalte: 0 });
+  const [stats, setStats] = useState({ afventer: 0, aktive: 0, udbetalte: 0 });
 
-  // Tjek session via server
+  // Tjek session
   useEffect(() => {
     fetch("/api/admin/verify")
       .then((res) => setLoggetInd(res.ok))
@@ -79,7 +77,7 @@ export default function AdminPage() {
 
     await new Promise((r) => setTimeout(r, 100));
 
-    const scanner = new Html5Qrcode(scannerContainerId);
+    const scanner = new Html5Qrcode("qr-reader");
     scannerRef.current = scanner;
 
     try {
@@ -125,8 +123,31 @@ export default function AdminPage() {
     setScanResult(depositum);
   }
 
-  async function udbetal() {
+  async function aktiverKraemmer() {
     if (!scanResult) return;
+    setHandling(true);
+
+    const res = await fetch("/api/admin/aktiver", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ depositumId: scanResult.id }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      setScanFejl(err.error || "Fejl ved aktivering");
+      setHandling(false);
+      return;
+    }
+
+    setScanResult({ ...scanResult, status: "aktiv" });
+    setHandling(false);
+    hentData();
+  }
+
+  async function udbetalKraemmer() {
+    if (!scanResult) return;
+    setHandling(true);
 
     const res = await fetch("/api/admin/udbetal", {
       method: "POST",
@@ -137,22 +158,24 @@ export default function AdminPage() {
     if (!res.ok) {
       const err = await res.json();
       setScanFejl(err.error || "Fejl ved udbetaling");
+      setHandling(false);
       return;
     }
 
     setScanResult({ ...scanResult, status: "udbetalt" });
+    setHandling(false);
     hentData();
   }
 
-  async function lukSaeson() {
-    if (!confirm(`Er du sikker på, at du vil lukke sæson ${aktivSaeson}?`))
-      return;
+  function nulstil() {
+    setScanResult(null);
+    setScanFejl(null);
+  }
 
-    const res = await fetch("/api/admin/saeson", { method: "DELETE" });
-    if (!res.ok) {
-      alert("Fejl ved lukning af sæson");
-      return;
-    }
+  // Sæsonstyring
+  async function lukSaeson() {
+    if (!confirm(`Luk sæson ${aktivSaeson}?`)) return;
+    await fetch("/api/admin/saeson", { method: "DELETE" });
     hentData();
   }
 
@@ -166,7 +189,7 @@ export default function AdminPage() {
     hentData();
   }
 
-  // Indlæser
+  // Loading
   if (loggetInd === null) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -175,7 +198,7 @@ export default function AdminPage() {
     );
   }
 
-  // Login-skærm
+  // Login
   if (!loggetInd) {
     return (
       <div className="max-w-sm mx-auto p-6 pt-20">
@@ -210,29 +233,30 @@ export default function AdminPage() {
     <div className="max-w-lg mx-auto p-6 pt-8">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Admin</h1>
-        <button
-          onClick={logout}
-          className="text-sm text-gray-500 hover:text-gray-700"
-        >
+        <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-700">
           Log ud
         </button>
       </div>
 
       {/* Statistik */}
-      <div className="grid grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-6">
         <div className="bg-white rounded-xl shadow p-4 text-center">
-          <p className="text-3xl font-bold text-green-600">{stats.aktive}</p>
-          <p className="text-sm text-gray-500">Aktive</p>
+          <p className="text-2xl font-bold text-yellow-600">{stats.afventer}</p>
+          <p className="text-xs text-gray-500">Afventer</p>
         </div>
         <div className="bg-white rounded-xl shadow p-4 text-center">
-          <p className="text-3xl font-bold text-blue-600">{stats.udbetalte}</p>
-          <p className="text-sm text-gray-500">Udbetalte</p>
+          <p className="text-2xl font-bold text-green-600">{stats.aktive}</p>
+          <p className="text-xs text-gray-500">Aktive</p>
+        </div>
+        <div className="bg-white rounded-xl shadow p-4 text-center">
+          <p className="text-2xl font-bold text-blue-600">{stats.udbetalte}</p>
+          <p className="text-xs text-gray-500">Udbetalte</p>
         </div>
       </div>
 
       {/* QR Scanner */}
       <div className="bg-white rounded-xl shadow p-6 mb-6">
-        <h2 className="font-semibold mb-4">Scan kræmmer-QR</h2>
+        <h2 className="font-semibold mb-4">Scan kræmmer</h2>
 
         {!scanning && !scanResult && !scanFejl && (
           <button
@@ -245,10 +269,7 @@ export default function AdminPage() {
 
         {scanning && (
           <div>
-            <div
-              id={scannerContainerId}
-              className="rounded-lg overflow-hidden mb-3"
-            />
+            <div id="qr-reader" className="rounded-lg overflow-hidden mb-3" />
             <button
               onClick={stopScanner}
               className="w-full bg-gray-200 text-gray-700 py-2 rounded-lg text-sm"
@@ -258,68 +279,76 @@ export default function AdminPage() {
           </div>
         )}
 
-        {scanResult && scanResult.status === "aktiv" && (
+        {/* Status: Afventer → kan aktiveres */}
+        {scanResult && scanResult.status === "afventer" && (
           <div className="text-center">
-            <div className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium mb-3">
-              Aktiv
+            <div className="inline-block px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-sm font-medium mb-3">
+              Afventer aktivering
             </div>
-            <p className="text-gray-600 text-sm mb-1">
-              Oprettet:{" "}
-              {new Date(scanResult.oprettet_at).toLocaleDateString("da-DK")}
-            </p>
-            <p className="text-gray-400 text-xs mb-4">
-              ID: {scanResult.id.slice(0, 8)}...
+            <p className="text-gray-600 text-sm mb-4">
+              Kræmmeren har ikke betalt depositum endnu.
             </p>
             <button
-              onClick={udbetal}
-              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 transition text-lg"
+              onClick={aktiverKraemmer}
+              disabled={handling}
+              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 transition text-lg"
             >
-              Udbetal depositum
+              {handling ? "Aktiverer..." : "Aktivér — depositum betalt"}
             </button>
-            <button
-              onClick={() => {
-                setScanResult(null);
-                setScanFejl(null);
-              }}
-              className="w-full mt-2 text-gray-500 text-sm py-2"
-            >
+            <button onClick={nulstil} className="w-full mt-2 text-gray-500 text-sm py-2">
               Annuller
             </button>
           </div>
         )}
 
+        {/* Status: Aktiv → kan udbetales */}
+        {scanResult && scanResult.status === "aktiv" && (
+          <div className="text-center">
+            <div className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium mb-3">
+              Aktiv
+            </div>
+            <p className="text-gray-600 text-sm mb-4">
+              Kræmmeren har betalt depositum. Tjek at pladsen er pæn.
+            </p>
+            <button
+              onClick={udbetalKraemmer}
+              disabled={handling}
+              className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition text-lg"
+            >
+              {handling ? "Udbetaler..." : "Udbetal depositum"}
+            </button>
+            <button onClick={nulstil} className="w-full mt-2 text-gray-500 text-sm py-2">
+              Annuller
+            </button>
+          </div>
+        )}
+
+        {/* Status: Udbetalt → ADVARSEL */}
         {scanResult && scanResult.status === "udbetalt" && (
           <div className="text-center">
             <div className="bg-red-100 border-2 border-red-400 rounded-xl p-6 mb-4">
-              <p className="text-red-700 font-bold text-lg">
+              <p className="text-red-700 font-bold text-xl mb-1">
                 ALLEREDE UDBETALT
               </p>
-              <p className="text-red-600 text-sm mt-1">
-                Dette depositum er allerede blevet udbetalt. Udbetal IKKE igen.
+              <p className="text-red-600 text-sm">
+                Dette depositum er allerede udbetalt. Muligt forsøg på snyd!
               </p>
             </div>
-            <button
-              onClick={() => {
-                setScanResult(null);
-                setScanFejl(null);
-              }}
-              className="text-gray-500 text-sm py-2"
-            >
+            <button onClick={nulstil} className="text-gray-500 text-sm py-2">
               Scan ny
             </button>
           </div>
         )}
 
-        {scanFejl && (
+        {/* Lige aktiveret — bekræftelse */}
+        {scanResult && scanResult.status === "aktiv" && !handling && scanResult.status === "aktiv" && (
+          <></>
+        )}
+
+        {scanFejl && !scanResult && (
           <div className="text-center">
             <p className="text-red-500 mb-3">{scanFejl}</p>
-            <button
-              onClick={() => {
-                setScanResult(null);
-                setScanFejl(null);
-              }}
-              className="text-blue-600 text-sm"
-            >
+            <button onClick={nulstil} className="text-blue-600 text-sm">
               Prøv igen
             </button>
           </div>

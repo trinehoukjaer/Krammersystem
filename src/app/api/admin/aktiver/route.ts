@@ -13,6 +13,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Ugyldigt ID" }, { status: 400 });
   }
 
+  // Tjek nuværende status
   const { data: existing } = await supabaseAdmin
     .from("deposita")
     .select("status")
@@ -23,25 +24,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Depositum ikke fundet" }, { status: 404 });
   }
 
-  if (existing.status === "udbetalt") {
-    return NextResponse.json({ error: "Allerede udbetalt" }, { status: 409 });
-  }
-
-  if (existing.status === "afventer") {
+  if (existing.status !== "afventer") {
     return NextResponse.json(
-      { error: "Kræmmeren er ikke aktiveret endnu" },
+      { error: `Kan ikke aktivere — status er allerede '${existing.status}'` },
       { status: 409 }
     );
   }
 
   const { error } = await supabaseAdmin
     .from("deposita")
-    .update({ status: "udbetalt" })
+    .update({ status: "aktiv" })
     .eq("id", depositumId)
-    .eq("status", "aktiv"); // Extra guard
+    .eq("status", "afventer"); // Extra guard
 
   if (error) {
-    return NextResponse.json({ error: "Fejl ved udbetaling" }, { status: 500 });
+    return NextResponse.json({ error: "Fejl ved aktivering" }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });
