@@ -25,6 +25,7 @@ export default function AdminPage() {
   const [scanResult, setScanResult] = useState<Depositum | null>(null);
   const [scanFejl, setScanFejl] = useState<string | null>(null);
   const [handling, setHandling] = useState(false);
+  const [bekraeftelse, setBekraeftelse] = useState<string | null>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
   const [saesoner, setSaesoner] = useState<Saeson[]>([]);
@@ -123,6 +124,22 @@ export default function AdminPage() {
     setScanResult(depositum);
   }
 
+  function nulstilTilScanner() {
+    setScanResult(null);
+    setScanFejl(null);
+    setBekraeftelse(null);
+  }
+
+  function visBekreeftelse(besked: string) {
+    setScanResult(null);
+    setScanFejl(null);
+    setBekraeftelse(besked);
+    hentData();
+    setTimeout(() => {
+      setBekraeftelse(null);
+    }, 2000);
+  }
+
   async function aktiverKraemmer() {
     if (!scanResult) return;
     setHandling(true);
@@ -133,16 +150,16 @@ export default function AdminPage() {
       body: JSON.stringify({ depositumId: scanResult.id }),
     });
 
+    setHandling(false);
+
     if (!res.ok) {
       const err = await res.json();
       setScanFejl(err.error || "Fejl ved aktivering");
-      setHandling(false);
+      setScanResult(null);
       return;
     }
 
-    setScanResult({ ...scanResult, status: "aktiv" });
-    setHandling(false);
-    hentData();
+    visBekreeftelse("Kræmmer aktiveret!");
   }
 
   async function udbetalKraemmer() {
@@ -155,21 +172,16 @@ export default function AdminPage() {
       body: JSON.stringify({ depositumId: scanResult.id }),
     });
 
+    setHandling(false);
+
     if (!res.ok) {
       const err = await res.json();
       setScanFejl(err.error || "Fejl ved udbetaling");
-      setHandling(false);
+      setScanResult(null);
       return;
     }
 
-    setScanResult({ ...scanResult, status: "udbetalt" });
-    setHandling(false);
-    hentData();
-  }
-
-  function nulstil() {
-    setScanResult(null);
-    setScanFejl(null);
+    visBekreeftelse("Depositum udbetalt!");
   }
 
   // Sæsonstyring
@@ -258,7 +270,17 @@ export default function AdminPage() {
       <div className="bg-white rounded-xl shadow p-6 mb-6">
         <h2 className="font-semibold mb-4">Scan kræmmer</h2>
 
-        {!scanning && !scanResult && !scanFejl && (
+        {/* Bekræftelses-besked efter handling */}
+        {bekraeftelse && (
+          <div className="text-center">
+            <div className="bg-green-100 border-2 border-green-400 rounded-xl p-6">
+              <p className="text-green-700 font-bold text-lg">{bekraeftelse}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Klar til scanning */}
+        {!scanning && !scanResult && !scanFejl && !bekraeftelse && (
           <button
             onClick={startScanner}
             className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition"
@@ -295,7 +317,7 @@ export default function AdminPage() {
             >
               {handling ? "Aktiverer..." : "Aktivér — depositum betalt"}
             </button>
-            <button onClick={nulstil} className="w-full mt-2 text-gray-500 text-sm py-2">
+            <button onClick={nulstilTilScanner} className="w-full mt-2 text-gray-500 text-sm py-2">
               Annuller
             </button>
           </div>
@@ -317,13 +339,13 @@ export default function AdminPage() {
             >
               {handling ? "Udbetaler..." : "Udbetal depositum"}
             </button>
-            <button onClick={nulstil} className="w-full mt-2 text-gray-500 text-sm py-2">
+            <button onClick={nulstilTilScanner} className="w-full mt-2 text-gray-500 text-sm py-2">
               Annuller
             </button>
           </div>
         )}
 
-        {/* Status: Udbetalt → ADVARSEL */}
+        {/* Status: Udbetalt → ADVARSEL (kun fra database-opslag) */}
         {scanResult && scanResult.status === "udbetalt" && (
           <div className="text-center">
             <div className="bg-red-100 border-2 border-red-400 rounded-xl p-6 mb-4">
@@ -334,21 +356,16 @@ export default function AdminPage() {
                 Dette depositum er allerede udbetalt. Muligt forsøg på snyd!
               </p>
             </div>
-            <button onClick={nulstil} className="text-gray-500 text-sm py-2">
+            <button onClick={nulstilTilScanner} className="text-gray-500 text-sm py-2">
               Scan ny
             </button>
           </div>
         )}
 
-        {/* Lige aktiveret — bekræftelse */}
-        {scanResult && scanResult.status === "aktiv" && !handling && scanResult.status === "aktiv" && (
-          <></>
-        )}
-
         {scanFejl && !scanResult && (
           <div className="text-center">
             <p className="text-red-500 mb-3">{scanFejl}</p>
-            <button onClick={nulstil} className="text-blue-600 text-sm">
+            <button onClick={nulstilTilScanner} className="text-blue-600 text-sm">
               Prøv igen
             </button>
           </div>
