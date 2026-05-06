@@ -42,3 +42,45 @@ create policy "Læs sæsoner"
   using (true);
 
 -- Ingen UPDATE/DELETE for anon — alt admin sker via service_role server-side
+
+-- ==============================================================
+-- State-machine-beskyttelse
+-- --------------------------------------------------------------
+-- Status MÅ kun bevæge sig én vej:
+--   afventer  ->  aktiv
+--   aktiv     ->  udbetalt
+-- Direkte spring (afventer -> udbetalt) er ALDRIG tilladt — heller
+-- ikke for service_role. Triggeren rejser en exception ved forbudt
+-- overgang, så ingen kombination af to-fejl, race-conditions eller
+-- ondsindet API-misbrug kan udbetale uden forudgående aktivering.
+-- ==============================================================
+create or replace function deposita_enforce_state_machine()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.status = old.status then
+    return new;
+  end if;
+
+  if old.status = 'afventer' and new.status = 'aktiv' then
+    return new;
+  end if;
+
+  if old.status = 'aktiv' and new.status = 'udbetalt' then
+    return new;
+  end if;
+
+  raise exception
+    'Ulovlig status-overgang: % -> % (id=%)',
+    old.status, new.status, old.id
+    using errcode = 'check_violation';
+end;
+$$;
+
+drop trigger if exists trg_deposita_state_machine on deposita;
+
+create trigger trg_deposita_state_machine
+  before update of status on deposita
+  for each row
+  execute function deposita_enforce_state_machine();

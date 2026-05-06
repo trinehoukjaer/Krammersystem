@@ -9,9 +9,14 @@ type Saeson = {
 };
 
 type Feedback = {
-  type: "aktiveret" | "udbetalt" | "advarsel" | "fejl";
+  type: "aktiveret" | "udbetalt" | "advarsel" | "fejl" | "udløbet";
   besked: string;
 };
+
+// Software-debounce: efter en succesfuld scan låses onScan i denne periode,
+// så admin ikke ved et uheld scanner samme telefon to gange og rykker
+// statussen videre (fx aktiv → udbetalt) ufrivilligt.
+const SCAN_LOCK_MS = 4000;
 
 // Generer en kort bip-lyd via Web Audio API
 function bip(frekvens: number, varighed: number) {
@@ -46,9 +51,11 @@ export default function AdminPage() {
   const [scanning, setScanning] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [behandler, setBehandler] = useState(false);
+  const [laasNedtaelling, setLaasNedtaelling] = useState(0);
   const scannerRef = useRef<Html5Qrcode | null>(null);
-  const sidsteScanRef = useRef<string>("");
-  const debounceRef = useRef<number>(0);
+  // Lås der blokerer onScan i SCAN_LOCK_MS efter en succesfuld scan
+  const laasIndtilRef = useRef<number>(0);
+  const nedtaellingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [saesoner, setSaesoner] = useState<Saeson[]>([]);
   const [aktivSaeson, setAktivSaeson] = useState<number | null>(null);
@@ -92,33 +99,79 @@ export default function AdminPage() {
     if (loggetInd) hentData();
   }, [loggetInd, hentData]);
 
+  // Ryd nedtælling-timer ved unmount så vi ikke lækker setInterval
+  useEffect(() => {
+    return () => {
+      if (nedtaellingTimerRef.current) {
+        clearInterval(nedtaellingTimerRef.current);
+      }
+    };
+  }, []);
+
+  function startLaasNedtaelling() {
+    laasIndtilRef.current = Date.now() + SCAN_LOCK_MS;
+    setLaasNedtaelling(Math.ceil(SCAN_LOCK_MS / 1000));
+
+    if (nedtaellingTimerRef.current) {
+      clearInterval(nedtaellingTimerRef.current);
+    }
+    nedtaellingTimerRef.current = setInterval(() => {
+      const tilbage = Math.max(0, laasIndtilRef.current - Date.now());
+      const sek = Math.ceil(tilbage / 1000);
+      setLaasNedtaelling(sek);
+      if (tilbage <= 0 && nedtaellingTimerRef.current) {
+        clearInterval(nedtaellingTimerRef.current);
+        nedtaellingTimerRef.current = null;
+      }
+    }, 200);
+  }
+
   // Auto-håndtering ved scan
   async function haandterScan(depositumId: string) {
-    // Debounce: ignorer samme kode indenfor 2 sekunder
-    const nu = Date.now();
-    if (depositumId === sidsteScanRef.current && nu - debounceRef.current < 2000) {
-      return;
-    }
-    sidsteScanRef.current = depositumId;
-    debounceRef.current = nu;
+    // Software-debounce: lås onScan i SCAN_LOCK_MS efter sidste behandling
+    if (Date.now() < laasIndtilRef.current) return;
+    if (behandler) return;
 
     setBehandler(true);
     setFeedback(null);
 
-    const res = await fetch("/api/admin/haandter", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ depositumId }),
-    });
+    let res: Response;
+    try {
+      res = await fetch("/api/admin/haandter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ depositumId }),
+      });
+    } catch {
+      setBehandler(false);
+      bip(200, 300);
+      vibrér(300);
+      setFeedback({ type: "fejl", besked: "Netværksfejl - prøv igen" });
+      autoNulstil(3000);
+      return;
+    }
 
     setBehandler(false);
 
     if (!res.ok) {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({}));
+      // 410 Gone = udløbet QR-kode
+      if (res.status === 410) {
+        bip(200, 300);
+        vibrér(300);
+        setFeedback({
+          type: "udløbet",
+          besked: err.error || "Udløbet kode - bed kræmmeren opdatere siden",
+        });
+        startLaasNedtaelling();
+        autoNulstil(SCAN_LOCK_MS);
+        return;
+      }
       bip(200, 300);
       vibrér(300);
       setFeedback({ type: "fejl", besked: err.error || "Ukendt fejl" });
-      autoNulstil(3000);
+      startLaasNedtaelling();
+      autoNulstil(SCAN_LOCK_MS);
       return;
     }
 
@@ -129,14 +182,16 @@ export default function AdminPage() {
       vibrér(100);
       setFeedback({ type: "aktiveret", besked: "Kræmmer aktiveret!" });
       hentData();
-      autoNulstil(2000);
+      startLaasNedtaelling();
+      autoNulstil(SCAN_LOCK_MS);
     } else if (resultat === "udbetalt") {
       bip(660, 150);
       setTimeout(() => bip(880, 150), 200);
       vibrér(100);
       setFeedback({ type: "udbetalt", besked: "Depositum udbetalt!" });
       hentData();
-      autoNulstil(2000);
+      startLaasNedtaelling();
+      autoNulstil(SCAN_LOCK_MS);
     } else if (resultat === "allerede_udbetalt") {
       bip(200, 500);
       vibrér(500);
@@ -144,7 +199,8 @@ export default function AdminPage() {
         type: "advarsel",
         besked: "ADVARSEL: Allerede udbetalt!",
       });
-      autoNulstil(3000);
+      startLaasNedtaelling();
+      autoNulstil(SCAN_LOCK_MS);
     }
   }
 
@@ -274,6 +330,7 @@ export default function AdminPage() {
     udbetalt: "bg-blue-100 border-blue-400 text-blue-700",
     advarsel: "bg-red-100 border-red-400 text-red-700",
     fejl: "bg-red-100 border-red-400 text-red-700",
+    udløbet: "bg-orange-100 border-orange-400 text-orange-700",
   };
 
   return (
@@ -349,6 +406,14 @@ export default function AdminPage() {
             {behandler && (
               <div className="text-center py-2">
                 <p className="text-gray-500 text-sm">Behandler...</p>
+              </div>
+            )}
+
+            {!behandler && laasNedtaelling > 0 && (
+              <div className="text-center py-2 bg-gray-50 rounded-lg mb-2">
+                <p className="text-gray-600 text-sm font-medium">
+                  Klar til næste scan om {laasNedtaelling}s
+                </p>
               </div>
             )}
 

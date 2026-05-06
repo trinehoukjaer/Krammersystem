@@ -6,11 +6,22 @@ import { supabase } from "@/lib/supabase";
 
 type Status = "ny" | "afventer" | "aktiv" | "udbetalt";
 
+// QR-payload genereres pr. minut og opdateres hvert 30. sekund.
+// Format: "v1:{deviceId}:{minutterSidenEpoch}"
+// Admin validerer at tidsstemplet er max 2 minutter gammelt.
+const QR_REFRESH_MS = 30_000;
+
+function buildQrPayload(deviceId: string): string {
+  const minute = Math.floor(Date.now() / 60_000);
+  return `v1:${deviceId}:${minute}`;
+}
+
 export default function KraemmerPage() {
   const [deviceId, setDeviceId] = useState("");
   const [depositId, setDepositId] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("ny");
   const [loading, setLoading] = useState(true);
+  const [qrPayload, setQrPayload] = useState("");
 
   // Generer eller hent device ID
   useEffect(() => {
@@ -69,6 +80,18 @@ export default function KraemmerPage() {
     init();
   }, [deviceId]);
 
+  // Roter QR-payload hvert 30. sekund (kun mens kræmmeren venter på scanning)
+  useEffect(() => {
+    if (!deviceId || status === "udbetalt" || status === "ny") return;
+
+    setQrPayload(buildQrPayload(deviceId));
+    const interval = setInterval(() => {
+      setQrPayload(buildQrPayload(deviceId));
+    }, QR_REFRESH_MS);
+
+    return () => clearInterval(interval);
+  }, [deviceId, status]);
+
   // Poll for statusopdatering hvert 3. sekund
   useEffect(() => {
     if (!depositId || status === "udbetalt") return;
@@ -106,7 +129,7 @@ export default function KraemmerPage() {
       </p>
 
       {/* Afventer — vis QR til første scanning */}
-      {status === "afventer" && depositId && (
+      {status === "afventer" && depositId && qrPayload && (
         <div className="bg-white rounded-xl shadow p-6 text-center">
           <div className="inline-block px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-sm font-medium mb-4">
             Afventer aktivering
@@ -116,16 +139,16 @@ export default function KraemmerPage() {
             depositum.
           </p>
           <div className="flex justify-center mb-4 p-4 bg-white rounded-lg border-2 border-gray-100">
-            <QRCodeSVG value={depositId} size={220} level="H" />
+            <QRCodeSVG value={qrPayload} size={220} level="H" />
           </div>
           <p className="text-xs text-gray-400">
-            Siden opdaterer automatisk når du er aktiveret.
+            Koden fornyes automatisk. Siden opdaterer når du er aktiveret.
           </p>
         </div>
       )}
 
       {/* Aktiv — vis QR til anden scanning */}
-      {status === "aktiv" && depositId && (
+      {status === "aktiv" && depositId && qrPayload && (
         <div className="bg-white rounded-xl shadow p-6 text-center">
           <div className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium mb-4">
             Aktiv
@@ -135,10 +158,10 @@ export default function KraemmerPage() {
             når markedet er slut for at få dit depositum udbetalt.
           </p>
           <div className="flex justify-center mb-4 p-4 bg-white rounded-lg border-2 border-gray-100">
-            <QRCodeSVG value={depositId} size={220} level="H" />
+            <QRCodeSVG value={qrPayload} size={220} level="H" />
           </div>
           <p className="text-xs text-gray-400">
-            Husk: Vis din pæne plads først!
+            Husk: Vis din pæne plads først! Koden fornyes automatisk.
           </p>
         </div>
       )}
