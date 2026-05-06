@@ -13,10 +13,9 @@ type Feedback = {
   besked: string;
 };
 
-// Software-debounce: efter en succesfuld scan låses onScan i denne periode,
-// så admin ikke ved et uheld scanner samme telefon to gange og rykker
-// statussen videre (fx aktiv → udbetalt) ufrivilligt.
-const SCAN_LOCK_MS = 4000;
+// Hård scan-lås: 5 sekunder efter en behandling er færdig.
+// Skal være lang nok til at admin kan fjerne telefonen fra kameraet.
+const SCAN_LOCK_MS = 5000;
 
 // Generer en kort bip-lyd via Web Audio API
 function bip(frekvens: number, varighed: number) {
@@ -50,12 +49,21 @@ export default function AdminPage() {
 
   const [scanning, setScanning] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
-  const [behandler, setBehandler] = useState(false);
+
+  // HÅRD LÅS:
+  //   isProcessing (state)   — driver UI, gør "Behandler..."/nedtælling synlig
+  //   isProcessingRef (ref)  — synkron lås, opdateres ØJEBLIKKELIGT så
+  //                            efterfølgende scan-callbacks fra html5-qrcode
+  //                            blokeres uanset om React har re-renderet endnu.
+  // useState alene er IKKE nok — staten opdateres asynkront, så to
+  // scan-callbacks i samme tick vil begge se isProcessing === false.
+  const [isProcessing, setIsProcessing] = useState(false);
+  const isProcessingRef = useRef(false);
+
   const [laasNedtaelling, setLaasNedtaelling] = useState(0);
   const scannerRef = useRef<Html5Qrcode | null>(null);
-  // Lås der blokerer onScan i SCAN_LOCK_MS efter en succesfuld scan
-  const laasIndtilRef = useRef<number>(0);
   const nedtaellingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const slipLaasTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [saesoner, setSaesoner] = useState<Saeson[]>([]);
   const [aktivSaeson, setAktivSaeson] = useState<number | null>(null);
@@ -99,40 +107,51 @@ export default function AdminPage() {
     if (loggetInd) hentData();
   }, [loggetInd, hentData]);
 
-  // Ryd nedtælling-timer ved unmount så vi ikke lækker setInterval
+  // Ryd timere ved unmount så vi ikke lækker
   useEffect(() => {
     return () => {
-      if (nedtaellingTimerRef.current) {
-        clearInterval(nedtaellingTimerRef.current);
-      }
+      if (nedtaellingTimerRef.current) clearInterval(nedtaellingTimerRef.current);
+      if (slipLaasTimerRef.current) clearTimeout(slipLaasTimerRef.current);
     };
   }, []);
 
-  function startLaasNedtaelling() {
-    laasIndtilRef.current = Date.now() + SCAN_LOCK_MS;
+  function autoNulstil(ms: number) {
+    setTimeout(() => {
+      setFeedback(null);
+    }, ms);
+  }
+
+  // Starter den 5-sek nedtælling og slipper låsen når den er forbi.
+  function startCooldown() {
+    const sluttidspunkt = Date.now() + SCAN_LOCK_MS;
     setLaasNedtaelling(Math.ceil(SCAN_LOCK_MS / 1000));
 
-    if (nedtaellingTimerRef.current) {
-      clearInterval(nedtaellingTimerRef.current);
-    }
+    if (nedtaellingTimerRef.current) clearInterval(nedtaellingTimerRef.current);
     nedtaellingTimerRef.current = setInterval(() => {
-      const tilbage = Math.max(0, laasIndtilRef.current - Date.now());
-      const sek = Math.ceil(tilbage / 1000);
-      setLaasNedtaelling(sek);
+      const tilbage = Math.max(0, sluttidspunkt - Date.now());
+      setLaasNedtaelling(Math.ceil(tilbage / 1000));
       if (tilbage <= 0 && nedtaellingTimerRef.current) {
         clearInterval(nedtaellingTimerRef.current);
         nedtaellingTimerRef.current = null;
       }
     }, 200);
+
+    if (slipLaasTimerRef.current) clearTimeout(slipLaasTimerRef.current);
+    slipLaasTimerRef.current = setTimeout(() => {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }, SCAN_LOCK_MS);
   }
 
   // Auto-håndtering ved scan
   async function haandterScan(depositumId: string) {
-    // Software-debounce: lås onScan i SCAN_LOCK_MS efter sidste behandling
-    if (Date.now() < laasIndtilRef.current) return;
-    if (behandler) return;
+    // 1. HÅRD SPÆRRING — synkron ref-tjek (virker også for callbacks
+    //    der fyrer mellem React-renders).
+    if (isProcessingRef.current) return;
 
-    setBehandler(true);
+    // 2. ØJEBLIKKELIG LÅS — sæt ref FØRST (synkron), derefter useState (UI).
+    isProcessingRef.current = true;
+    setIsProcessing(true);
     setFeedback(null);
 
     let res: Response;
@@ -143,15 +162,14 @@ export default function AdminPage() {
         body: JSON.stringify({ depositumId }),
       });
     } catch {
-      setBehandler(false);
       bip(200, 300);
       vibrér(300);
       setFeedback({ type: "fejl", besked: "Netværksfejl - prøv igen" });
-      autoNulstil(3000);
+      // 5. Genåbn først efter 5 sek så admin har tid til at fjerne telefonen
+      startCooldown();
+      autoNulstil(SCAN_LOCK_MS);
       return;
     }
-
-    setBehandler(false);
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -163,35 +181,33 @@ export default function AdminPage() {
           type: "udløbet",
           besked: err.error || "Udløbet kode - bed kræmmeren opdatere siden",
         });
-        startLaasNedtaelling();
-        autoNulstil(SCAN_LOCK_MS);
-        return;
+      } else {
+        bip(200, 300);
+        vibrér(300);
+        setFeedback({ type: "fejl", besked: err.error || "Ukendt fejl" });
       }
-      bip(200, 300);
-      vibrér(300);
-      setFeedback({ type: "fejl", besked: err.error || "Ukendt fejl" });
-      startLaasNedtaelling();
+      startCooldown();
       autoNulstil(SCAN_LOCK_MS);
       return;
     }
 
     const { resultat } = await res.json();
 
+    // 4. DATABASE-CHECK: API'et bruger UPDATE … WHERE status = 'afventer'
+    //    (eller 'aktiv'). Hvis et race-call sniger sig forbi front-end-låsen
+    //    rammer det 0 ændrede rækker, og APIet returnerer fejl/allerede_udbetalt
+    //    — ALDRIG en springover-overgang.
     if (resultat === "aktiveret") {
       bip(880, 150);
       vibrér(100);
       setFeedback({ type: "aktiveret", besked: "Kræmmer aktiveret!" });
       hentData();
-      startLaasNedtaelling();
-      autoNulstil(SCAN_LOCK_MS);
     } else if (resultat === "udbetalt") {
       bip(660, 150);
       setTimeout(() => bip(880, 150), 200);
       vibrér(100);
       setFeedback({ type: "udbetalt", besked: "Depositum udbetalt!" });
       hentData();
-      startLaasNedtaelling();
-      autoNulstil(SCAN_LOCK_MS);
     } else if (resultat === "allerede_udbetalt") {
       bip(200, 500);
       vibrér(500);
@@ -199,15 +215,10 @@ export default function AdminPage() {
         type: "advarsel",
         besked: "ADVARSEL: Allerede udbetalt!",
       });
-      startLaasNedtaelling();
-      autoNulstil(SCAN_LOCK_MS);
     }
-  }
 
-  function autoNulstil(ms: number) {
-    setTimeout(() => {
-      setFeedback(null);
-    }, ms);
+    startCooldown();
+    autoNulstil(SCAN_LOCK_MS);
   }
 
   // QR Scanner — kører kontinuerligt, stopper ikke ved scan
@@ -225,7 +236,7 @@ export default function AdminPage() {
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 250, height: 250 } },
         async (decodedText) => {
-          // Scanner kører videre — debounce håndterer dubletter
+          // Scanner kører videre — den hårde lås håndterer dubletter
           await haandterScan(decodedText);
         },
         () => {}
@@ -403,16 +414,20 @@ export default function AdminPage() {
               </div>
             )}
 
-            {behandler && (
-              <div className="text-center py-2">
-                <p className="text-gray-500 text-sm">Behandler...</p>
+            {/* Behandler... vises mens API'et kører OG der ikke er feedback endnu */}
+            {isProcessing && !feedback && (
+              <div className="text-center py-3 bg-blue-50 rounded-lg mb-2">
+                <p className="text-blue-700 text-sm font-semibold animate-pulse">
+                  Behandler...
+                </p>
               </div>
             )}
 
-            {!behandler && laasNedtaelling > 0 && (
-              <div className="text-center py-2 bg-gray-50 rounded-lg mb-2">
-                <p className="text-gray-600 text-sm font-medium">
-                  Klar til næste scan om {laasNedtaelling}s
+            {/* Cooldown-nedtælling efter behandling */}
+            {isProcessing && feedback && laasNedtaelling > 0 && (
+              <div className="text-center py-2 bg-gray-100 rounded-lg mb-2 border border-gray-200">
+                <p className="text-gray-700 text-sm font-medium">
+                  Lås aktiv — klar igen om {laasNedtaelling}s
                 </p>
               </div>
             )}
